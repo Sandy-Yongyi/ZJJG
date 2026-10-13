@@ -82,7 +82,7 @@ class ModernButton(wx.Button):
 
     def _update_button_appearance(self):
         """根据启用/禁用状态更新按钮外观"""
-        if self.IsEnabled() and self.visual_active:
+        if self.visual_active:
             # 启用时：使用darker效果（减20）
             self.current_bg = wx.Colour(max(0, self.bg_color.red - 20), max(0, self.bg_color.green - 20), max(0, self.bg_color.blue - 20))
             self.current_text_color = self.text_color
@@ -138,185 +138,91 @@ class ModernButton(wx.Button):
 
 
 class MainFrame(wx.Frame):
+    """左侧采集控制及输出，右侧为完整的 3D 点云显示区域。"""
+
     def __init__(self, parent):
         super().__init__(parent, title="Joihey Software")
         self.SetBackgroundColour(BG_COLOR_LIGHT_GREEN)
-
-        # 尝试加载ico图标（如果存在）
+        self.SetMinSize(wx.Size(800, 480))
+        self.SetFont(wx.SystemSettings.GetFont(wx.SYS_DEFAULT_GUI_FONT))
         icon_path = os.path.join(os.path.dirname(__file__), "..", "data", "picture", "junhe.ico")
         if os.path.exists(icon_path):
-            icon = wx.Icon(icon_path, wx.BITMAP_TYPE_ICO)
-            self.SetIcon(icon)
-
+            self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_ICO))
         self.InitUI()
-        # 设置窗口为最大化状态（自适应屏幕尺寸）
-        self.Maximize(True)
         self._set_control_buttons_active(False)
-        self._set_param_buttons_enabled(False)
 
     def InitUI(self):
-        # 创建滚动窗口
-        scrolled_window = wx.ScrolledWindow(self)
-        scrolled_window.SetScrollRate(20, 20)
-        scrolled_window.SetBackgroundColour(BG_COLOR_LIGHT_GREEN)
-
-        # 主面板
-        panel = wx.Panel(scrolled_window)
+        panel = wx.Panel(self)
         panel.SetBackgroundColour(BG_COLOR_LIGHT_GREEN)
         main_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        # ================= Left: Control Panel =================
-        left_scrolled = wx.ScrolledWindow(panel, size=wx.Size(410, -1))
-        left_scrolled.SetScrollRate(10, 10)
-        left_scrolled.SetBackgroundColour(wx.Colour(240, 240, 240))
-        left_scrolled.SetMinSize(wx.Size(410, -1))
+        # 左栏保持固定宽度；输出框随窗口高度填充按钮下方的空间。
+        self.control_panel = wx.Panel(panel, size=wx.Size(360, -1))
+        self.control_panel.SetMinSize(wx.Size(360, -1))
+        self.control_panel.SetBackgroundColour(wx.Colour(240, 240, 240))
+        left_sizer = wx.BoxSizer(wx.VERTICAL)
+        control_box = wx.StaticBox(self.control_panel, label="采集控制")
+        control_sizer = wx.StaticBoxSizer(control_box, wx.VERTICAL)
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.start_btn = ModernButton(
+            control_box, label="开始", size=wx.Size(145, 44), bg_color=BG_COLOR_GREEN,
+        )
+        self.stop_btn = ModernButton(
+            control_box, label="结束", size=wx.Size(145, 44), bg_color=BG_COLOR_RED,
+        )
+        button_sizer.Add(self.start_btn, 1, wx.EXPAND | wx.ALL, 5)
+        button_sizer.Add(self.stop_btn, 1, wx.EXPAND | wx.ALL, 5)
+        control_sizer.Add(button_sizer, 0, wx.EXPAND | wx.ALL, 5)
+        left_sizer.Add(control_sizer, 0, wx.EXPAND | wx.ALL, 10)
 
-        left_vbox = wx.BoxSizer(wx.VERTICAL)
-
-        # Control box
-        control_box = wx.StaticBox(left_scrolled, label="Control Panel")
-        control_box_sizer = wx.StaticBoxSizer(control_box, wx.VERTICAL)
-
-        btn_sizer1 = wx.BoxSizer(wx.HORIZONTAL)
-        self.start_btn = ModernButton(control_box_sizer.GetStaticBox(), label="Start Software", size=wx.Size(180, 40), bg_color=BG_COLOR_GREEN)
-        self.stop_btn = ModernButton(control_box_sizer.GetStaticBox(), label="Stop Software", size=wx.Size(180, 40), bg_color=BG_COLOR_RED)
-        btn_sizer1.Add(self.start_btn, 0, wx.ALL, 5)
-        btn_sizer1.Add(self.stop_btn, 0, wx.ALL, 5)
-
-        status_sizer1 = wx.BoxSizer(wx.HORIZONTAL)
-        status_label1 = wx.StaticText(control_box_sizer.GetStaticBox(), label="Lidar Scan Position:", size=wx.Size(140, 30))
-        self.chain_pos_text = wx.TextCtrl(control_box_sizer.GetStaticBox(), value="0", size=wx.Size(100, 30))
-        status_label2 = wx.StaticText(control_box_sizer.GetStaticBox(), label="mm", size=wx.Size(50, 30))
-        self.chain_pos_text.Enable(False)
-        status_sizer1.Add(status_label1, 0, wx.ALL, 5)
-        status_sizer1.Add(self.chain_pos_text, 0, wx.ALL, 5)
-        status_sizer1.Add(status_label2, 0, wx.ALL, 5)
-
-        control_box_sizer.Add(btn_sizer1, 0, wx.ALL, 5)
-        control_box_sizer.Add(status_sizer1, 0, wx.ALL, 5)
-
-        # Parameter box
-        param_box = wx.StaticBox(left_scrolled, label="Parameter Settings")
-        param_box_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
-
-        status_sizer2 = wx.BoxSizer(wx.HORIZONTAL)
-        status_label3 = wx.StaticText(param_box_sizer.GetStaticBox(), label="Lidar Scan Speed:", size=wx.Size(140, 30))
-        self.chain_speed_text = wx.TextCtrl(param_box_sizer.GetStaticBox(), value="25", size=wx.Size(100, 30))
-        status_label4 = wx.StaticText(param_box_sizer.GetStaticBox(), label="mm/s", size=wx.Size(50, 30))
-        status_sizer2.Add(status_label3, 0, wx.ALL, 5)
-        status_sizer2.Add(self.chain_speed_text, 0, wx.ALL, 5)
-        self.chain_speed_text.Enable(False)
-        status_sizer2.Add(status_label4, 0, wx.ALL, 5)
-
-        param_box_sizer.Add(status_sizer2, 0, wx.EXPAND | wx.ALL, 5)
-        self.save_setting_btn = ModernButton(param_box_sizer.GetStaticBox(), label="Save setting", size=wx.Size(180, 40), bg_color=BG_COLOR_BLUE)
-        param_box_sizer.Add(self.save_setting_btn, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 5)
-
-        # Spray box
-        spray_box = wx.StaticBox(left_scrolled, label="Spraying Control")
-        spray_box_sizer = wx.StaticBoxSizer(spray_box, wx.VERTICAL)
-
-        status_label10 = wx.StaticText(spray_box_sizer.GetStaticBox(), label="                    Left                                         Right", size=wx.Size(300, 30))
-        btn_sizer2 = wx.BoxSizer(wx.HORIZONTAL)
-        self.left_side_btn = ModernButton(spray_box_sizer.GetStaticBox(), label="Side Spray Machine", size=wx.Size(180, 40), bg_color=BG_COLOR_BLUE)
-        self.right_side_btn = ModernButton(spray_box_sizer.GetStaticBox(), label="Side Spray Machine", size=wx.Size(180, 40), bg_color=BG_COLOR_BLUE)
-        btn_sizer2.Add(self.left_side_btn, 0, wx.ALL, 5)
-        btn_sizer2.Add(self.right_side_btn, 0, wx.ALL, 5)
-
-        btn_sizer3 = wx.BoxSizer(wx.HORIZONTAL)
-        self.left_lift_btn = ModernButton(spray_box_sizer.GetStaticBox(), label="2D Lift Machine", size=wx.Size(180, 40), bg_color=BG_COLOR_BLUE)
-        self.right_lift_btn = ModernButton(spray_box_sizer.GetStaticBox(), label="2D Lift Machine", size=wx.Size(180, 40), bg_color=BG_COLOR_BLUE)
-        btn_sizer3.Add(self.left_lift_btn, 0, wx.ALL, 5)
-        btn_sizer3.Add(self.right_lift_btn, 0, wx.ALL, 5)
-
-        spray_box_sizer.Add(status_label10, 0, wx.EXPAND | wx.ALL, 5)
-        spray_box_sizer.Add(btn_sizer2, 0, wx.EXPAND | wx.ALL, 5)
-        spray_box_sizer.Add(btn_sizer3, 0, wx.EXPAND | wx.ALL, 5)
-
-        # Status output panel (moved to right)
-        status_panel = wx.Panel(panel)
-        status_panel.SetBackgroundColour(wx.Colour(240, 240, 240))
-        status_panel.SetMinSize(wx.Size(300, 300))
+        self.status_panel = wx.Panel(self.control_panel)
         status_sizer = wx.BoxSizer(wx.VERTICAL)
-        status_label = wx.StaticText(status_panel, label="Status Output:")
-        self.status_text = wx.TextCtrl(status_panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
+        status_sizer.Add(wx.StaticText(self.status_panel, label="运行输出"), 0, wx.BOTTOM, 5)
+        self.status_text = wx.TextCtrl(
+            self.status_panel, style=wx.TE_MULTILINE | wx.TE_READONLY,
+        )
         self.status_text.SetInsertionPointEnd()
+        status_sizer.Add(self.status_text, 1, wx.EXPAND)
+        self.status_panel.SetSizer(status_sizer)
+        left_sizer.Add(self.status_panel, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        self.control_panel.SetSizer(left_sizer)
 
-        status_sizer.Add(status_label, 0, wx.ALL, 5)
-        status_sizer.Add(self.status_text, 1, wx.EXPAND | wx.ALL, 5)
-        status_panel.SetSizer(status_sizer)
-
-        left_vbox.Add(control_box_sizer, 0, wx.EXPAND | wx.ALL, 10)
-        left_vbox.Add(param_box_sizer, 0, wx.EXPAND | wx.ALL, 10)
-        left_vbox.Add(spray_box_sizer, 0, wx.EXPAND | wx.ALL, 10)
-
-        left_scrolled.SetSizer(left_vbox)
-
-        # ================= Center: 3D View =================
-        right_panel = wx.Panel(panel)
+        # 右栏全部用于点云画布，不再放置输出框或设备参数控件。
+        self.point_cloud_panel = wx.Panel(panel)
+        self.point_cloud_panel.SetBackgroundColour(wx.Colour(200, 200, 200))
         right_sizer = wx.BoxSizer(wx.VERTICAL)
+        title = wx.StaticText(self.point_cloud_panel, label="3D 点云显示")
+        right_sizer.Add(title, 0, wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM, 8)
+        self.gl_canvas = PointCloudCanvas(self.point_cloud_panel)
+        right_sizer.Add(self.gl_canvas, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        self.point_cloud_panel.SetSizer(right_sizer)
 
-        center_panel = wx.Panel(right_panel)
-        center_panel.SetBackgroundColour(wx.Colour(200, 200, 200))
-        center_panel.SetMinSize(wx.Size(300, 200))
-        center_sizer = wx.BoxSizer(wx.VERTICAL)
-
-        title_label = wx.StaticText(center_panel, label="3D Point Cloud Visualization")
-        center_sizer.Add(title_label, 0, wx.ALIGN_CENTER | wx.TOP, 10)
-
-        self.gl_canvas = PointCloudCanvas(center_panel)
-        center_sizer.Add(self.gl_canvas, 1, wx.EXPAND | wx.ALL, 5)
-        center_panel.SetSizer(center_sizer)
-
-        right_sizer.Add(center_panel, 1, wx.EXPAND | wx.ALL, 5)
-        right_panel.SetSizer(right_sizer)
-
-        # ================= Main layout =================
-        main_sizer.Add(left_scrolled, 0, wx.EXPAND | wx.ALL, 5)
-        main_sizer.Add(right_panel, 1, wx.EXPAND | wx.ALL, 5)
-        main_sizer.Add(status_panel, 0, wx.EXPAND | wx.ALL, 5)
-
+        main_sizer.Add(self.control_panel, 0, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(self.point_cloud_panel, 1, wx.EXPAND | wx.ALL, 5)
         panel.SetSizer(main_sizer)
-
-        scrolled_sizer = wx.BoxSizer(wx.VERTICAL)
-        scrolled_sizer.Add(panel, 1, wx.EXPAND)
-        scrolled_window.SetSizer(scrolled_sizer)
-
-        # 设置字体
-        default_font = wx.SystemSettings.GetFont(wx.SYS_DEFAULT_GUI_FONT)
-        self.SetFont(default_font)
-
-        # 设置虚拟大小
-        left_scrolled.SetVirtualSize(left_vbox.GetMinSize())
+        frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        frame_sizer.Add(panel, 1, wx.EXPAND)
+        self.SetSizer(frame_sizer)
 
     def _set_param_buttons_enabled(self, enabled: bool):
-        """设置参数设置按钮的启用/禁用状态"""
-        self.left_side_btn.Enable(enabled)
-        self.right_side_btn.Enable(enabled)
-        self.left_lift_btn.Enable(enabled)
-        self.right_lift_btn.Enable(enabled)
+        pass  # 参数配置控件已移除
 
     def _set_control_buttons_active(self, active: bool):
-        """设置开始/结束按钮是否显示彩色外观"""
         self.start_btn.SetVisualActive(active)
         self.stop_btn.SetVisualActive(active)
-        self.save_setting_btn.SetVisualActive(active)
-        self.start_btn.Enable(True)
+        self.start_btn.Enable(not active)
         self.stop_btn.Enable(active)
 
     def on_program_started(self):
-        """程序启动后被调用，启用彩色按钮和参数设置按钮"""
         self._set_control_buttons_active(True)
-        self._set_param_buttons_enabled(True)
 
     def on_program_stopped(self):
-        """程序停止后被调用，恢复为灰色按钮并禁用参数设置按钮"""
         self._set_control_buttons_active(False)
-        self._set_param_buttons_enabled(False)
 
 
 if __name__ == "__main__":
     app = wx.App()
     frame = MainFrame(None)
+    frame.Maximize(True)
     frame.Show()
     app.MainLoop()

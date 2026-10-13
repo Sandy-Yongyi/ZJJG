@@ -2,106 +2,60 @@ import os
 import sys
 import time
 import math
+import queue
 import multiprocessing
-from typing import Any, cast
 from model.utils.LoggerUtil import check_and_rotate_log, logger
 from model.plc.PlcCommon import PlcManager
 from model.utils.TomlLoader import TomlLoader
-from model.plc.MovingFrameData import SendMovingFrameData
-from model.utils.FrameQueueManager import FrameQueueManager
-from model.formats.frame_by_frame.AxisFrameDataFormat import AxisFrameData
-from model.motionplan.MotionFrameByFramePlanning import MotionFrameByFramePlanning
-from model.utils.StrategyUtil import is_complete_workpiece_mode, is_continuous_bidirectional_mode, validate_strategy_name
-from model.utils.MachineConfigUtil import MACHINE_OFFSET_KEYS, get_machine_config_path, normalize_machine_config_offsets, normalize_machine_offset_values
+from model.plc.MovingFrameData import ReceiveMovingFrameData, SendMovingFrameData
+from model.utils.StrategyUtil import validate_strategy_name
 from model.utils.ProcessHeartbeat import ProcessHeartbeat
 
 
 class SimulatedPlcData:
     def __init__(self):
-        self.ChainPulse = 0.0
+        self.ChainPulse = 0
         self.ChainSpeed = 0
         self.ChainStatus = "stopped"
         self.ChainCountCM = 0
         self.Status = 1
         self.Operate = 0
+        self.HeartBeat = 0
         self.AxisList = []
 
 
 class PlcCommunicationProcess(multiprocessing.Process):
     def _text(self, chinese, english):
-        return english if is_continuous_bidirectional_mode(self.strategy_name) else chinese
+        return chinese
 
     def __init__(self, raw_data_queue, pulse_queue, control_queue, machine_data_queue=None, strategy_name="frame_by_frame", heartbeat=None, heartbeat_interval_s: float = 1.0):
         super().__init__()
         self.raw_data_queue = raw_data_queue
         self.pulse_queue = pulse_queue
         self.control_queue = control_queue
-        self.machine_data_queue = machine_data_queue  # 用于 complete_workpiece 模式
+        self.machine_data_queue = machine_data_queue
         self.strategy_name = validate_strategy_name(strategy_name)
         self._heartbeat = ProcessHeartbeat(heartbeat, heartbeat_interval_s)
-
         self.config_dir = os.path.join(os.getcwd(), "model", "tomls")
         self.plc_config_path = os.path.join(self.config_dir, "PlcConfig.toml")
         self.read_data_config_path = os.path.join(self.config_dir, "ReadDataConfig.toml")
-        self.machine_config_path = get_machine_config_path(self.config_dir, self.strategy_name)
-        self.spray_config_path = os.path.join(self.config_dir, "SprayConfig.toml")
-        self.system_config_path = os.path.join(self.config_dir, "SystemConfig.toml")
-        self.mode_config_path = os.path.join(self.config_dir, "ModeConfig.toml")
-
-        self.plc_config = cast(dict[str, Any], {})
-        self.plc_manager = cast(PlcManager, None)
-        self.read_data_config = cast(dict[str, Any], {})
-        self.machine_config = cast(dict[str, Any], {})
-        self.runtime_spray_config = cast(dict[str, Any], {})
-        self.mode_config = cast(dict[str, Any], {})
-        self.frame_by_frame_motion_planner = cast(MotionFrameByFramePlanning, None)
-        self.frame_queue_manager = cast(FrameQueueManager, None)
-
+        self.plc_config = {}
+        self.read_data_config = {}
+        self.plc_manager = None
+        self.plc_data = None
+        self.max_pulse = 160000
         self.max_fifo = 0
-        self.max_retries = 3
-        self.diff_start_pulse = 7
         self.pulse_to_mm = 1
         self.fifo_unit_mm = 2
+        self.diff_start_pulse = 7
         self.plc_connected = False
         self.plc_reconnect_pending = False
         self.plc_connection_generation = 0
         self.pulse_history = []
         self.chain_motion_status = "stopped"
         self.lidar_status = 0
-        self.last_lidar_status_log_time = 0.0
-        self.last_synced_chain_fifo = None
-        self.current_cycle_raw_shift_steps = 0
-        self.last_raw_frame_time = 0.0
-        self.last_raw_frame_fifo = None
-        self.raw_data_timeout_active = False
-        self.raw_data_timeout_s = 0.5
-
-        # 运行时设备参数
-        self.runtime_machine_config = {}
-        self.runtime_param_keys = {
-            "tracking", "y_move_min", "y_move_max",
-            "x_pos_speed", "x_recip_speed", "y_pos_speed", "y_recip_speed", "z_zeroing_speed",
-            "z_spray_position", "x_status_offset",
-            "outside_total_cycles", "inside_total_cycles",
-            "recip_reduce_distance",
-            "out_front_x_offset", "out_after_x_offset", "in_front_x_offset", "in_after_x_offset",
-            "origin_pos", "out_up_y_offset", "out_down_y_offset",
-            "in_up_y_offset", "in_down_y_offset", "out_z_front_offset", "out_z_after_offset",
-            "search_front_z_offset", "search_after_z_offset", "in_z_front_offset", "in_z_after_offset", "z_back_speed",
-        }
-
-        # 计算设备数量
-        self.num_devices = 0
-
-        # 模拟模式相关
-        self.simulation_mode = False  # 启用模拟模式
-        self.last_simulation_time = 0  # 记录上次模拟处理时间
-
-        # 设备运动状态跟踪
-        self.device_origin_complete = {}  # 跟踪每个设备是否全部轴回0
-        self.last_operate_state = 0  # 记录上一次的Operate状态，用于检测设备状态变化
-        self.device_returning_to_origin = {}  # 跟踪每个设备是否正在回原点
-        # 标准输出重定向
+        self.simulation_mode = False
+        self.last_simulation_time = 0
         self.stdout = sys.stdout
         self.stderr = sys.stderr
 
@@ -114,40 +68,18 @@ class PlcCommunicationProcess(multiprocessing.Process):
         """基于 pulse 重置阈值推导 chaincountcm 的最大值。"""
         return max(1, self._pulse_to_chaincountcm(self.max_pulse))
 
-    def _get_fifo_step_delta(self, last_fifo: int, current_fifo: int) -> int:
-        """计算 FIFO 的有符号步数，支持 max_fifo -> 0 的正常回绕。"""
-        ring_size = self.max_fifo + 1
-        last_fifo = int(last_fifo) % ring_size
-        current_fifo = int(current_fifo) % ring_size
-        forward_gap = (current_fifo - last_fifo) % ring_size
-
-        if forward_gap == 0:
-            return 0
-
-        # 例如 max_fifo=3018 时：3018 -> 0 的 forward_gap 为 1，视为正常前进一帧。
-        if forward_gap <= ring_size // 2:
-            return forward_gap
-
-        return forward_gap - ring_size
+    def _get_fifo_step_delta(self, last_fifo: int, current_fifo: int):
+        pass  # 采数显示项目不使用此接口
 
     @staticmethod
     def create(strategy_name, raw_data_queue, pulse_queue, control_queue, machine_data_queue=None, heartbeat=None, heartbeat_interval_s: float = 1.0):
-        """
-        工厂方法：根据采集策略创建 PlcCommunicationProcess 实例
-        Args:
-            strategy_name: 采集策略名称（仅支持 'frame_by_frame'）
-            raw_data_queue: 原始数据队列
-            pulse_queue: 脉冲数据队列
-            machine_data_queue: 机器数据队列（仅用于 complete_workpiece 模式）
-        Returns:
-            PlcCommunicationProcess 实例
-        """
+        """保留工厂接口，仅创建按帧采数的 PLC 通信进程。"""
         validate_strategy_name(strategy_name)
-        if strategy_name == "complete_workpiece":
-            pass  # 该策略已移除
-        else:
-            # frame_by_frame 使用 raw_data_queue
-            return PlcCommunicationProcess(raw_data_queue, pulse_queue, control_queue, strategy_name=strategy_name, heartbeat=heartbeat, heartbeat_interval_s=heartbeat_interval_s)
+        return PlcCommunicationProcess(
+            raw_data_queue, pulse_queue, control_queue,
+            machine_data_queue=machine_data_queue, strategy_name=strategy_name,
+            heartbeat=heartbeat, heartbeat_interval_s=heartbeat_interval_s,
+        )
 
     def run(self):
         logger.info(f"PlcCommunicationProcess.run() entered, pid={os.getpid()}")
@@ -176,110 +108,36 @@ class PlcCommunicationProcess(multiprocessing.Process):
                 self.plc.disconnect(self.connection_type)
 
     def _initialize_runtime_state(self):
-        """在子进程内初始化重对象，避免 spawn 时在父进程构造/序列化大量数据。"""
-        logger.info(f"Initialize PLC runtime with strategy_name={self.strategy_name}")
+        """只加载 PLC 和采数配置，不加载设备配置或创建规划器。"""
         self.plc_config = TomlLoader.load(self.plc_config_path)
         self.plc_manager = PlcManager(self.plc_config_path)
         self.read_data_config = TomlLoader.load(self.read_data_config_path)
         self.pulse_to_mm = float(self.read_data_config["pulse_to_mm"])
         if not math.isfinite(self.pulse_to_mm) or self.pulse_to_mm <= 0:
-            raise ValueError(self._text("pulse_to_mm必须为正数", "pulse_to_mm must be a positive finite number."))
-        self.machine_config = normalize_machine_config_offsets(TomlLoader.load(self.machine_config_path))
-        if is_continuous_bidirectional_mode(self.strategy_name):
-            pass  # 该策略已移除
-        self.runtime_spray_config = TomlLoader.load(self.spray_config_path)
-        self.mode_config = TomlLoader.load(self.mode_config_path)
-        self.frame_by_frame_motion_planner = MotionFrameByFramePlanning()
-        spray_mode = int(self.mode_config.get("spray_mode", 0) or 0)
-        mode_text = "手动模式" if spray_mode == 1 else "自动模式"
-        logger.info(f"PLC runtime spray mode: {mode_text} (spray_mode={spray_mode})")
-
+            raise ValueError("pulse_to_mm必须为正数")
         self.max_pulse = self.read_data_config.get("max_pulse", 160000)
-        self.max_retries = self.read_data_config.get("plc_send_max_retries", 3)
         self.diff_start_pulse = self.read_data_config.get("diff_start_pulse", 7)
         self.fifo_unit_mm = self.read_data_config.get("fifo_unit_mm", 2)
         self.max_fifo = self._resolve_max_fifo()
-        self.raw_data_timeout_s = float(self.read_data_config.get("raw_data_timeout_s", 10) or 10)
-        self.last_raw_frame_time = time.time()
-        self.last_raw_frame_fifo = None
-        self.last_synced_chain_fifo = None
-        self.current_cycle_raw_shift_steps = 0
-        self.raw_data_timeout_active = False
-        self.reconnect_raw_packet_floor_fifo = None
-
-        self.frame_queue_manager = self._create_frame_queue_manager()
-
-        self._initialize_device_runtime_state(return_to_safe=False)
 
     def _initialize_device_runtime_state(self, return_to_safe: bool):
-        """Initialize configured spray devices for every motion strategy."""
-        self.runtime_machine_config = {}
-        for sn_str, cfg in self.machine_config.items():
-            sn = int(sn_str)
-            self.runtime_machine_config[sn] = self._build_runtime_machine_config(cfg)
-            runtime_offsets = {
-                key: self.runtime_machine_config[sn][key]
-                for key in MACHINE_OFFSET_KEYS
-                if key in self.runtime_machine_config[sn]
-            }
-            logger.info(f"SN[{sn}] runtime offsets initialized: {runtime_offsets}")
-        self.num_devices = max(int(k) for k in self.machine_config) + 1 if self.machine_config else 0
-        self.device_origin_complete = {sn: not return_to_safe for sn in range(self.num_devices)}
-        self.device_returning_to_origin = {sn: return_to_safe for sn in range(self.num_devices)}
-        self.last_operate_state = 0
+        pass  # 采数显示项目不使用此接口
 
-    def _build_runtime_machine_config(self, cfg: dict) -> dict:
-        runtime_cfg = {}
-        for key in self.runtime_param_keys:
-            if key in cfg:
-                runtime_cfg[key] = cfg[key]
+    def _build_runtime_machine_config(self, cfg: dict):
+        pass  # 采数显示项目不使用此接口
 
-        flat_cfg = cfg.get("flat")
-        if isinstance(flat_cfg, dict):
-            runtime_cfg["flat"] = {key: value for key, value in flat_cfg.items() if key in self.runtime_param_keys}
-        return runtime_cfg
-
-    def _create_frame_queue_manager(self) -> FrameQueueManager:
-        """根据当前喷涂策略创建对应参数的 FrameQueueManager。"""
-        stack_size = int(self.read_data_config.get(f"{self.strategy_name}_queue_size", 1500))
-        y_min = int(self.read_data_config.get("combined_y_min", 1100))
-        y_max = int(self.read_data_config.get("combined_y_max", 3800))
-        y_threshold = int(self.read_data_config.get("y_threshold", 10))
-        x_min = int(self.read_data_config.get("combined_x_min", 0))
-        x_max = int(self.read_data_config.get("combined_x_max", 900))
-        x_threshold = int(self.read_data_config.get("x_threshold", 10))
-
-        logger.info(
-            "Create FrameQueueManager with strategy=%s, stack_size=%s, y=[%s,%s,%s], x=[%s,%s,%s]",
-            self.strategy_name,
-            stack_size,
-            y_min,
-            y_max,
-            y_threshold,
-            x_min,
-            x_max,
-            x_threshold,
-        )
-
-        return FrameQueueManager(
-            system_config_path=self.system_config_path,
-            stack_size=stack_size,
-            y_min=y_min,
-            y_max=y_max,
-            y_threshold=y_threshold,
-            x_min=x_min,
-            x_max=x_max,
-            x_threshold=x_threshold,
-            strategy_name=self.strategy_name,
-            machine_config=self.machine_config,
-        )
+    def _create_frame_queue_manager(self):
+        pass  # 采数显示项目不使用此接口
 
     def _initialize_connection(self):
         """初始化PLC连接"""
         try:
             # 获取配置信息
             self.connection_type = self.plc_config["1"]["connection_type"]
-            self.plc = self.plc_manager.get_plc("1")
+            plc_manager = self.plc_manager
+            if plc_manager is None:
+                raise RuntimeError("PLC manager has not been initialized")
+            self.plc = plc_manager.get_plc("1")
 
             # 初始连接
             if not self.plc.connect(self.connection_type):
@@ -298,88 +156,52 @@ class PlcCommunicationProcess(multiprocessing.Process):
             return False
 
     def _run_main_loop(self):
-        """主处理循环，同时处理模拟和实际模式"""
+        """接收采数脉冲并回传心跳，发送报文的其他字段保持全零。"""
         while True:
-            time.sleep(0.09)  # 减少CPU占用
-            self._heartbeat.touch()
+            self._heartbeat.sleep(0.09)
             if not self._update_plc_data():
                 continue
-            if is_continuous_bidirectional_mode(self.strategy_name):
-                pass  # 该策略已移除
-            elif is_complete_workpiece_mode(self.strategy_name):
-                pass  # 该策略已移除
-            else:
-                self.current_cycle_raw_shift_steps = 0
-                self._process_frame_data()
-                self._sync_frame_queue_with_chain_fifo()
-            self._update_enable_value()
+            self._process_frame_data()
             check_and_rotate_log()
-            # 处理数据发送，发送给PLC
-            moving_frame = self._axis_to_moving_frame()  # 按当前模式转换为运动帧数据
             if not self.simulation_mode:
-                # logger.info(f"PLC Operate=0b{int(self.plc_data.Operate):016b}")
-                logger.debug(f"moving now send moving_frame {moving_frame}")
                 try:
-                    self.plc.send_frame(moving_frame)
-                except OSError:
-                    if is_continuous_bidirectional_mode(self.strategy_name):
-                        pass  # 该策略已移除
-                    raise
-            if is_continuous_bidirectional_mode(self.strategy_name):
-                pass  # 该策略已移除
+                    self.plc.send_frame(self._axis_to_moving_frame())
+                except (ConnectionError, OSError) as exc:
+                    logger.error(f"PLC heartbeat response failed: {exc}")
+                    self._mark_plc_disconnected()
+                    if not self._handle_connection_error(self.plc):
+                        return
 
     def _update_plc_data(self):
         try:
-            if is_continuous_bidirectional_mode(self.strategy_name):
-                pass  # 该策略已移除
-
-            # 模拟模式处理逻辑
             if self.simulation_mode:
                 current_time = time.time()
-                # 每0.04秒处理一次, 对应链速1.5
-                if current_time - self.last_simulation_time >= 0.3:
+                if self.plc_data is None or current_time - self.last_simulation_time >= 0.3:
                     if not hasattr(self, "simulated_plc_data"):
-                        self.simulated_plc_data = SimulatedPlcData()
-
-                    # 当前 fifo 使用 pulse 换算后的 chaincountcm，需与 pulse 同步回绕
-                    pulse_step = max(1, int(round(float(self.fifo_unit_mm) * float(self.pulse_to_mm))))
-
-                    self.simulated_plc_data.ChainPulse = self._advance_simulated_pulse(self.simulated_plc_data.ChainPulse, pulse_step)
-                    self.simulated_plc_data.ChainCountCM = self._pulse_to_chaincountcm(self.simulated_plc_data.ChainPulse)
-
+                        self.simulated_plc_data = ReceiveMovingFrameData(Status=1)
+                    pulse_step = max(1, int(round(float(self.fifo_unit_mm) * self.pulse_to_mm)))
+                    self.simulated_plc_data.ChainPulse = self._advance_simulated_pulse(
+                        self.simulated_plc_data.ChainPulse, pulse_step,
+                    )
                     self.plc_data = self.simulated_plc_data
                     self.last_simulation_time = current_time
-                    self._update_chain_status(self.plc_data.ChainCountCM, self.plc_data.ChainPulse)
-
-            # 实际PLC模式处理逻辑
+                else:
+                    return False
             else:
-                # 接收并处理PLC数据
                 self.plc_data = self.plc.scan(self.connection_type)
-                chaincountcm = self._pulse_to_chaincountcm(self.plc_data.ChainPulse)
-                setattr(self.plc_data, "ChainCountCM", chaincountcm)
-                self._update_chain_status(chaincountcm, self.plc_data.ChainPulse)
-
-                logger.info(f"plc tcp recv data: self.plc_data.AxisList: {self.plc_data.AxisList}")
-                # # 处理脉冲和定位数据
-                # self.pulse_queue.put({'pulse': self.plc_data.ChainPulse, 'fifo': self.plc_data.ChainCountCM})
-
+            fifo = self._pulse_to_chaincountcm(self.plc_data.ChainPulse)
+            setattr(self.plc_data, "ChainCountCM", fifo)
+            self.plc_reconnect_pending = False
+            self._update_chain_status(fifo, self.plc_data.ChainPulse)
             return True
-
-        except (ConnectionResetError, BrokenPipeError, OSError) as e:
-            if is_continuous_bidirectional_mode(self.strategy_name):
-                pass  # 该策略已移除
-            # 处理连接异常
-            if not self.simulation_mode:
-                logger.error(f"Connection error during operation: {str(e)}")
-                self._mark_plc_disconnected()
-                # 尝试重连
-                if not self._handle_connection_error(self.plc):
-                    logger.error("Failed to reconnect after connection loss. Exiting process.")
-            return False  # 本轮通信失败，不使用旧PLC数据继续计算或发送
-
-        except Exception as e:
-            # 处理其他异常
-            logger.error(f"Unexpected error: {str(e)}")
+        except (ConnectionError, OSError) as exc:
+            logger.error(f"PLC receive failed: {exc}")
+            self._mark_plc_disconnected()
+            if not self.simulation_mode and not self._handle_connection_error(self.plc):
+                raise
+            return False
+        except Exception as exc:
+            logger.error(f"PLC receive data error: {exc}")
             return False
 
     def _advance_simulated_pulse(self, current_pulse, pulse_step):
@@ -389,11 +211,7 @@ class PlcCommunicationProcess(multiprocessing.Process):
         return 0 if next_pulse >= reset_threshold else next_pulse
 
     def _reset_raw_data_timeout_timer(self, fifo=None):
-        """重置激光数据超时计时，供链条重新启动或收到新帧时调用。"""
-        self.last_raw_frame_time = time.time()
-        if fifo is not None:
-            self.last_raw_frame_fifo = fifo
-        self.raw_data_timeout_active = False
+        pass  # 采数显示项目不使用此接口
 
     def _update_chain_status(self, fifo, pulse):
         self.pulse_history.append(pulse)
@@ -435,315 +253,97 @@ class PlcCommunicationProcess(multiprocessing.Process):
         })
 
     def _update_lidar_status_from_packet(self, fifo_data: dict):
-        if "lidar_status" in fifo_data:
-            self._update_lidar_status(int(fifo_data.get("lidar_status", 0) or 0))
+        pass  # 采数显示项目不使用此接口
 
-    def _should_skip_raw_packet(self) -> bool:
-        return int(getattr(self, "lidar_status", 0) or 0) in (1, 2, 3)
+    def _should_skip_raw_packet(self):
+        pass  # 采数显示项目不使用此接口
 
     def _process_frame_data(self):
-        """按帧模式处理激光采集队列。"""
-        try:
-            while not self.raw_data_queue.empty():
-                fifo_data = self.raw_data_queue.get_nowait()
-                if not isinstance(fifo_data, dict):
-                    continue
-                self._update_lidar_status_from_packet(fifo_data)
-                if self._should_skip_raw_packet():
-                    continue
-                if self._should_drop_reconnect_raw_packet(fifo_data):
-                    continue
-                if bool(fifo_data.get("reset_queue", False)):
-                    self._clear_all_frame_queues()
+        """消费采集进程的数据与状态，避免队列积压；不执行帧规划。"""
+        while True:
+            try:
+                packet = self.raw_data_queue.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(packet, dict) and "lidar_status" in packet:
+                status = int(packet["lidar_status"] or 0)
+                if status != self.lidar_status:
+                    logger.info(f"Lidar status changed: {self.lidar_status} -> {status}")
+                    self.lidar_status = status
 
-                repeat_count = int(fifo_data.get("repeat_count", 1) or 1)
-                frame_packet_received = False
-                for direction in self.frame_queue_manager.active_directions:
-                    frame = fifo_data.get(direction)
-                    if not isinstance(frame, AxisFrameData):
-                        continue
-                    self.frame_queue_manager.push_frame(direction, frame, repeat_count=repeat_count)
-                    frame_packet_received = True
-                    if direction == "left":
-                        logger.debug(f"get raw_data_queue fifo is {fifo_data.get('fifo', 1)}")
-                if frame_packet_received:
-                    self._handle_frame_packet_received(fifo_data, repeat_count)
-        except Exception as e:
-            logger.error(f"Error processing raw data from queue: {e}")
-
-    def _should_drop_reconnect_raw_packet(self, fifo_data: dict) -> bool:
-        """重连补空后丢弃不晚于同步基准的旧包，避免队列被再次推进。"""
-        floor_fifo = getattr(self, "reconnect_raw_packet_floor_fifo", None)
-        if floor_fifo is None or "fifo" not in fifo_data:
-            return False
-
-        packet_fifo = int(fifo_data.get("fifo", 0) or 0)
-        if self._get_fifo_step_delta(floor_fifo, packet_fifo) <= 0:
-            logger.warning(
-                f"Ignore stale lidar frame after PLC reconnect: floor={floor_fifo}, packet={packet_fifo}"
-            )
-            return True
-
-        self.reconnect_raw_packet_floor_fifo = None
-        return False
+    def _should_drop_reconnect_raw_packet(self, fifo_data: dict):
+        pass  # 采数显示项目不使用此接口
 
     def _process_continuous_scan_cycle(self):
         # 仅保留按帧模式，此接口不再执行。
-        pass
+        pass  # 采数显示项目不使用此接口
 
     def _publish_continuous_scan_state(self):
         # 仅保留按帧模式，此接口不再执行。
-        pass
+        pass  # 采数显示项目不使用此接口
 
     def _process_workpiece_data(self):
         # 仅保留按帧模式，此接口不再执行。
-        pass
+        pass  # 采数显示项目不使用此接口
 
     def _update_workpiece_tracking_after_push(self, direction: str, sn: int, insert_index: int, shifted: bool):
         # 仅保留按帧模式，此接口不再执行。
-        pass
+        pass  # 采数显示项目不使用此接口
 
     def _build_machine_workpiece(self, block_data, sn: int):
         # 仅保留按帧模式，此接口不再执行。
-        pass
+        pass  # 采数显示项目不使用此接口
 
     def _handle_frame_packet_received(self, fifo_data: dict, repeat_count: int):
-        self.current_cycle_raw_shift_steps += repeat_count
-        was_timeout_active = self.raw_data_timeout_active
-        self._reset_raw_data_timeout_timer(fifo=fifo_data.get("fifo", None))
-        if was_timeout_active:
-            msg = f"激光采样数据已恢复，最新FIFO={self.last_raw_frame_fifo}，超时阈值={self.raw_data_timeout_s}s"
-            print(msg)
-            logger.info(msg)
-            self.raw_data_timeout_active = False
+        pass  # 采数显示项目不使用此接口
 
     def _push_empty_frames(self, repeat_count: int):
-        """链条在走但没有新激光帧时，补空帧推动队列前进，避免旧数据停在原位。"""
-        if is_complete_workpiece_mode(self.strategy_name):
-            pass  # 该策略已移除
-
-        if repeat_count <= 0:
-            return
-
-        for direction in tuple(self.frame_queue_manager.frame_stack.keys()):
-            empty_frame = self.frame_queue_manager.create_empty_frame_x() if direction in ("left_upper", "right_upper") else self.frame_queue_manager.create_empty_frame_y()
-            self.frame_queue_manager.push_frame(direction, empty_frame, repeat_count=repeat_count)
+        pass  # 采数显示项目不使用此接口
 
     def _sync_frame_queue_with_chain_fifo(self):
-        """以 PLC 当前 FIFO 为准同步 frame_by_frame 帧队列。"""
-
-        if not hasattr(self, "plc_data") or self.plc_data is None:
-            return
-
-        current_fifo = int(getattr(self.plc_data, "ChainCountCM", 0) or 0)
-        if self.last_synced_chain_fifo is None:
-            self.last_synced_chain_fifo = current_fifo
-            return
-
-        fifo_delta = self._get_fifo_step_delta(self.last_synced_chain_fifo, current_fifo)
-        if fifo_delta < 0:
-            logger.warning(f"PLC fifo reversed unexpectedly: last_synced={self.last_synced_chain_fifo}, cur={current_fifo}, reset sync base")
-            self.last_synced_chain_fifo = current_fifo
-            self.current_cycle_raw_shift_steps = 0
-            return
-
-        if fifo_delta > 0:
-            missing_shift = max(0, fifo_delta - self.current_cycle_raw_shift_steps)
-            if missing_shift > 0:
-                elapsed = time.time() - self.last_raw_frame_time
-                if elapsed >= self.raw_data_timeout_s:
-                    self._push_empty_frames(missing_shift)
-                    logger.warning(
-                        f"Chain fifo advanced without enough lidar frames: last_synced={self.last_synced_chain_fifo}, "
-                        f"cur={current_fifo}, fifo_delta={fifo_delta}, raw_shift={self.current_cycle_raw_shift_steps}, "
-                        f"inject_empty_shift={missing_shift}, elapsed={elapsed:.3f}s"
-                    )
-            self.last_synced_chain_fifo = current_fifo
-
-        self.current_cycle_raw_shift_steps = 0
-        self._update_raw_data_watchdog()
+        pass  # 采数显示项目不使用此接口
 
     def _resync_frame_queue_after_plc_reconnect(self):
-        """PLC 重连后按实际 FIFO 缺口补空帧，保留断线前已有帧的位置关系。"""
-        if not getattr(self, "plc_reconnect_pending", False):
-            return
-
-        current_fifo = int(getattr(self.plc_data, "ChainCountCM", 0) or 0)
-        previous_fifo = self.last_synced_chain_fifo
-        gap = 0 if previous_fifo is None else self._get_fifo_step_delta(previous_fifo, current_fifo)
-        if gap > 0:
-            self._push_empty_frames(gap)
-            logger.warning(
-                f"PLC reconnect fifo gap filled with empty frames: last_synced={previous_fifo}, "
-                f"cur={current_fifo}, gap={gap}"
-            )
-        elif gap < 0:
-            logger.warning(
-                f"PLC reconnect fifo moved backward unexpectedly: last_synced={previous_fifo}, "
-                f"cur={current_fifo}, reset sync base"
-            )
-
-        self.last_synced_chain_fifo = current_fifo
-        self.reconnect_raw_packet_floor_fifo = current_fifo
-        self.current_cycle_raw_shift_steps = 0
-        self.plc_reconnect_pending = False
+        pass  # 采数显示项目不使用此接口
 
     def _sync_complete_workpiece_positions(self):
         # 仅保留按帧模式，此接口不再执行。
-        pass
+        pass  # 采数显示项目不使用此接口
 
-    def _calc_delta_mm_with_wrap(self, current_mm: float, prev_mm: float) -> float:
+    def _calc_delta_mm_with_wrap(self, current_mm: float, prev_mm: float):
         # 仅保留按帧模式，此接口不再执行。
-        pass
+        pass  # 采数显示项目不使用此接口
 
     def _update_raw_data_watchdog(self):
-        """frame_by_frame 模式下，长时间没有收到激光帧时触发停链保护。"""
-
-        chain_running = getattr(self, "chain_motion_status", "stopped") == "moving_forward"
-        if not chain_running:
-            if self.raw_data_timeout_active:
-                msg = "链条已停止，清除激光采样超时保护状态"
-                print(msg)
-                logger.info(msg)
-            self.raw_data_timeout_active = False
-            return
-
-        elapsed = time.time() - self.last_raw_frame_time
-        if elapsed <= self.raw_data_timeout_s:
-            return
-
-        if not self.raw_data_timeout_active:
-            self.raw_data_timeout_active = True
-            self._clear_all_frame_queues()
-            msg = f"链条运行中已有 {elapsed:.3f}s 未收到新的激光帧，已清空帧队列并请求停链保护，最后一次FIFO={self.last_raw_frame_fifo}"
-            print(msg)
-            logger.error(msg)
+        pass  # 采数显示项目不使用此接口
 
     def _update_lidar_status(self, new_status: int):
-        """更新激光状态，并按要求输出节流日志。"""
-        new_status = int(new_status or 0)
-        old_status = int(getattr(self, "lidar_status", 0) or 0)
-        self.lidar_status = new_status
-
-        if new_status in (1, 2, 3):
-            if old_status not in (1, 2, 3):
-                self._clear_all_frame_queues()
-                cleared_count = self._clear_pending_raw_data_queue()
-                logger.warning(f"Lidar abnormal, cleared frame queues and dropped {cleared_count} pending raw packets")
-            now = time.time()
-            if new_status != old_status:
-                self.last_lidar_status_log_time = 0.0
-            if now - self.last_lidar_status_log_time >= 10:
-                if new_status == 1:
-                    msg = "激光有遮挡，已清空数据队列并禁止设备运动"
-                elif new_status == 2:
-                    msg = "激光异常，已清空数据队列并禁止设备运动"
-                else:
-                    msg = "激光断连，已清空数据队列并禁止设备运动"
-                print(msg)
-                logger.warning(msg)
-                self.last_lidar_status_log_time = now
-        elif old_status in (1, 2, 3):
-            msg = "激光正常了，设备恢复正常运动"
-            print(msg)
-            logger.info(msg)
-            self.last_lidar_status_log_time = 0.0
+        pass  # 采数显示项目不使用此接口
 
     def _clear_all_frame_queues(self):
-        for direction in self.frame_queue_manager.active_directions:
-            self.frame_queue_manager.clear(direction)
+        pass  # 采数显示项目不使用此接口
 
     def _clear_pending_raw_data_queue(self):
-        cleared_count = 0
-        try:
-            while True:
-                self.raw_data_queue.get_nowait()
-                cleared_count += 1
-        except Exception:
-            pass
-        return cleared_count
+        pass  # 采数显示项目不使用此接口
 
     def _update_enable_value(self):
-        try:
-            while not self.control_queue.empty():
-                msg = self.control_queue.get_nowait()
-                logger.info(f"control_queue recv: {msg}")
-                if not isinstance(msg, dict):
-                    logger.warning("control_queue msg is not dict, skipped")
-                    continue
-
-                if "lidar_scan_speed" in msg and is_continuous_bidirectional_mode(self.strategy_name):
-                    pass  # 该策略已移除
-
-                # machine config
-                if "machine" in msg:
-                    machine_msg = msg.get("machine")
-                    if not isinstance(machine_msg, dict):
-                        logger.warning("machine msg is not dict, skipped")
-                        continue
-                    sn = machine_msg.get("sn")
-                    if sn is None:
-                        logger.warning("machine msg without sn, skipped")
-                        continue
-                    config = {k: v for k, v in machine_msg.items() if k != "sn"}
-                    self._handle_config_update(sn=sn, config=config)
-                    continue
-
-                # spray config
-                if "spray" in msg:
-                    spray_cfg = msg.get("spray")
-                    if not isinstance(spray_cfg, dict):
-                        logger.warning("spray msg is not dict, skipped")
-                        continue
-                    self._handle_spray_update(spray_cfg)
-                    continue
-                logger.warning(f"Unknown control message type: {msg}")
-
-        except Exception as e:
-            logger.error(f"deal control queue error: {str(e)}")
+        pass  # 采数显示项目不使用此接口
 
     def _handle_config_update(self, sn: int, config: dict):
-        config = normalize_machine_offset_values(config, fill_missing=False)
-        sn_key = str(sn)
-        if sn_key in self.machine_config:
-            self.machine_config[sn_key].update(config)
-        else:
-            logger.warning(f"SN[{sn}] not found in machine_config, create one")
-            self.machine_config[sn_key] = {"sn": sn, **config}
-
-        if sn not in self.runtime_machine_config:
-            logger.warning(f"SN[{sn}] not found, create runtime config")
-            self.runtime_machine_config[sn] = {}
-        runtime_cfg = self.runtime_machine_config[sn]
-        for key, value in config.items():
-            if key == "flat" and isinstance(value, dict):
-                flat_runtime_cfg = runtime_cfg.setdefault("flat", {})
-                for flat_key, flat_value in value.items():
-                    if flat_key in self.runtime_param_keys:
-                        flat_runtime_cfg[flat_key] = flat_value
-                continue
-            if key not in self.runtime_param_keys:
-                continue
-            runtime_cfg[key] = value
-        logger.info(f"SN[{sn}] runtime config updated: {runtime_cfg}")
+        pass  # 采数显示项目不使用此接口
 
     def _handle_spray_update(self, spray_cfg: dict):
-        if not hasattr(self, "runtime_spray_config"):
-            self.runtime_spray_config = {}
-        for key, value in spray_cfg.items():
-            self.runtime_spray_config[key] = value
-        logger.info(f"Spray runtime config updated: {self.runtime_spray_config}")
+        pass  # 采数显示项目不使用此接口
 
     def _axis_to_moving_frame(self) -> SendMovingFrameData:
-        if is_continuous_bidirectional_mode(self.strategy_name):
-            pass  # 该策略已移除
-        if is_complete_workpiece_mode(self.strategy_name):
-            pass  # 该策略已移除
-        return self.frame_by_frame_motion_planner.build_moving_frame(self)
+        """兼容旧接口：仅回传收到的心跳，其他发送字段和全部轴数据为零。"""
+        response = SendMovingFrameData()
+        response.HeartBeat = getattr(self.plc_data, "HeartBeat", 0)
+        return response
 
     def after_spray_complete(self, direction: str, sn: int):
         # 仅保留按帧模式，此接口不再执行。
-        pass
+        pass  # 采数显示项目不使用此接口
 
     def _handle_connection_error(self, plc):
         """处理连接异常，支持初始连接和已连接状态的断开重连"""

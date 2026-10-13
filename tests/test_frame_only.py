@@ -10,8 +10,8 @@ from model.utils.StrategyUtil import strategy_name_from_code, validate_strategy_
 from control.DataProcessWorker import DataProcessWorker
 from control.LidarAcquisitionStrategies import AcquisitionStrategyFactory, FrameByFrameStrategy
 from control.PlcCommunicationProcess import PlcCommunicationProcess
-from model.motionplan.MotionFrameByFramePlanning import MotionFrameByFramePlanning
 from model.utils.FrameQueueManager import FrameQueueManager
+from model.plc.MovingFrameData import ReceiveMovingFrameData
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "model" / "tomls"
@@ -103,11 +103,32 @@ class FrameOnlyTests(unittest.TestCase):
             for empty_frame in manager.frame_stack[direction] for row in empty_frame.FrameData
         ))
 
-    def test_plc_runtime_initializes_frame_planner_without_other_configs(self):
+    def test_plc_runtime_does_not_load_machine_or_spray_config(self):
         process = PlcCommunicationProcess.create("frame_by_frame", Queue(), Queue(), Queue())
+        process.machine_config_path = str(CONFIG_DIR / "missing_machine_config.toml")
+        process.spray_config_path = str(CONFIG_DIR / "missing_spray_config.toml")
         process._initialize_runtime_state()
-        self.assertIsInstance(process.frame_by_frame_motion_planner, MotionFrameByFramePlanning)
-        self.assertTrue(process.frame_queue_manager.frame_stack)
+        for pulse in (0, 10, 20, 30, 40):
+            process._update_chain_status(process._pulse_to_chaincountcm(pulse), pulse)
+        samples = [process.pulse_queue.get_nowait() for _ in range(5)]
+        self.assertEqual(samples[-1]["pulse"], 40)
+        self.assertEqual(samples[-1]["status"], "moving_forward")
+
+    def test_plc_response_echoes_heartbeat_and_zeroes_all_other_bytes(self):
+        process = PlcCommunicationProcess.create("frame_by_frame", Queue(), Queue(), Queue())
+        for heartbeat in (0, 123, -123, 32767):
+            with self.subTest(heartbeat=heartbeat):
+                incoming = ReceiveMovingFrameData(
+                    HeartBeat=heartbeat, ChainPulse=123456, ChainSpeed=77, Status=5, Operate=9,
+                )
+                incoming.AxisList[0].Pos = 123
+                incoming.AxisList[0].Speed = 456
+                incoming.AxisList[0].Status = 7
+                process.plc_data = incoming
+                packet = process._axis_to_moving_frame().to_bytes()
+                expected = bytearray(194)
+                expected[10:12] = heartbeat.to_bytes(2, "big", signed=True)
+                self.assertEqual(packet, bytes(expected))
 
 
 if __name__ == "__main__":

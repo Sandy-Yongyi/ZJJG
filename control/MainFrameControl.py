@@ -10,9 +10,7 @@ from view.MainFrame import MainFrame
 from model.utils.TomlLoader import TomlLoader
 from model.utils.LidarDirectionUtil import get_active_directions, get_active_lidar_config
 from model.utils.StrategyUtil import is_complete_workpiece_mode, is_continuous_bidirectional_mode, strategy_name_from_code
-from model.plot.Draw import PointCloudVisualizer
 from model.dataprocess.DataFilter import DataFilter
-from view.MachineConfigFrame import MachineConfigFrame
 from view.PasswordDialog import PasswordDialog
 from model.utils.PasswordConfig import is_password_required
 from control.LidarAcquisitionProcess import LidarAcquisitionProcess
@@ -67,13 +65,9 @@ class MainFrameController(MainFrame):
         self.process_heartbeats = {}
         self._process_fault_handled = False
         self.sys_config = TomlLoader.load(f"{self.toml_path}\\SystemConfig.toml")
-        self.spray_config = TomlLoader.load(f"{self.toml_path}\\SprayConfig.toml")
         self.mode_config = TomlLoader.load(self.mode_config_path)
         self.strategy_name = strategy_name_from_code(self.mode_config.get("strategy_name"))
         self.gl_canvas.english = is_continuous_bidirectional_mode(self.strategy_name)
-        self.chain_speed_text.SetValue(str(self.read_data_config.get("lidar_scan_speed", 25)))
-        self.chain_speed_text.Enable(is_continuous_bidirectional_mode(self.strategy_name))
-        self.save_setting_btn.Enable(is_continuous_bidirectional_mode(self.strategy_name))
         self._ensure_password_config()
 
         # 重定向标准输出
@@ -83,30 +77,12 @@ class MainFrameController(MainFrame):
         # 绑定按钮事件
         self.start_btn.Bind(wx.EVT_BUTTON, self._handle_start_with_password)
         self.stop_btn.Bind(wx.EVT_BUTTON, self._handle_stop_with_password)
-        self.save_setting_btn.Bind(wx.EVT_BUTTON, self._save_lidar_scan_speed)
         if is_continuous_bidirectional_mode(self.strategy_name):
-            self.machine_config_buttons = {
-                0: self.left_side_btn, 1: self.left_lift_btn,
-                2: self.right_side_btn, 3: self.right_lift_btn,
-            }
-            self.left_side_btn.SetLabel("Side / Top / Bottom")
-            self.right_side_btn.SetLabel("Side / Top / Bottom")
-        for sn, button in getattr(self, "machine_config_buttons", {}).items():
-            button.Bind(wx.EVT_BUTTON, lambda e, target_sn=sn: self._open_machine_config_with_password(target_sn))
+            pass  # 该模式已移除
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
     def _save_lidar_scan_speed(self, event):
-        try:
-            speed = int(self.chain_speed_text.GetValue().strip())
-            if not 1 <= speed <= 50:
-                raise ValueError(self._text("速度必须为1～50的整数，单位mm/s", "Speed must be an integer between 1 and 50 mm/s."))
-            TomlLoader.save({"lidar_scan_speed": speed}, f"{self.toml_path}\\ReadDataConfig.toml")
-            self.read_data_config["lidar_scan_speed"] = speed
-            if self.running:
-                self.control_queue.put({"lidar_scan_speed": speed})
-            print(self._text(f"激光扫描及回零速度已保存：{speed} mm/s", f"Scan and homing speed saved: {speed} mm/s"))
-        except (ValueError, OSError) as exc:
-            wx.MessageBox(self._text(f"保存失败：{exc}", f"Failed to save settings: {exc}"), self._text("提示", "Information"), wx.OK | wx.ICON_ERROR)
+        pass  # 参数配置界面已移除
 
     def _ensure_password_config(self):
         password = str(self.mode_config.get("auth_password", "") or "").strip()
@@ -156,24 +132,10 @@ class MainFrameController(MainFrame):
             self.on_stop(event)
 
     def _open_machine_config_with_password(self, sn: int):
-        if self._verify_button_password():
-            self.open_machine_config(sn)
+        pass  # 参数配置界面已移除
 
     def open_machine_config(self, sn: int):
-        """打开设备配置对话框"""
-        if self.control_queue is None:
-            wx.MessageBox(self._text("请先启动程序后再修改参数", "Start the software before changing device settings."), self._text("提示", "Information"), wx.OK | wx.ICON_INFORMATION)
-            return
-
-        # 传递控制队列给对话框
-        dlg = MachineConfigFrame(
-            self,
-            sn,
-            self.control_queue,
-            strategy_name=self.strategy_name,
-        )
-        dlg.ShowModal()
-        dlg.Destroy()
+        pass  # 参数配置界面已移除
 
     @staticmethod
     def _new_process_heartbeat():
@@ -197,15 +159,9 @@ class MainFrameController(MainFrame):
         # 清理日志
         manage_log_files(log_directory)
         self.mode_config = TomlLoader.load(self.mode_config_path)
-        spray_mode = int(self.mode_config.get("spray_mode", 0) or 0)
-        mode_text = "手动模式" if spray_mode == 1 else "自动模式"
-        print(self._text(f"当前喷涂模式：{self.strategy_name}", f"Current operating mode: {self.strategy_name}"))
-        logger.info(f"Current spray mode: {mode_text} (spray_mode={spray_mode})")
+        print(f"当前采集模式：{self.strategy_name}")
 
-        # 启动激光采集进程，支持三种策略:
-        # continuous_bidirectional：为往复采集，0-3000或者3000-0，不间断采数，只在端点停止采数。（沙特项目）
-        # frame_by_frame：为逐帧采集并逐帧数据发送，可跟进fifo进行数据递增堆栈，（星沙、新疆大道等项目）
-        # complete_workpiece：为完成工件采集，每个工件采集完后进行分区及分枪处理再进行整个工件的数据发送。（上海展会、河村、欧瑞等项目）
+        # 仅启动按帧采数及 PLC 心跳通信，不执行路径规划。
         strategy_name = self.strategy_name
 
         if self.control_type == 1:
@@ -238,21 +194,7 @@ class MainFrameController(MainFrame):
             logger.info(f"process_worker process ID: {process_worker.pid}")
 
             if is_complete_workpiece_mode(strategy_name):
-                from control.DataProcessingProcess import DataProcessingProcess
-                machine_data_queue = multiprocessing.Queue()
-                data_processing_heartbeat = self._new_process_heartbeat()
-                data_processing = DataProcessingProcess(raw_data_queue=raw_data_queue,
-                                                        machine_data_queue=machine_data_queue,
-                                                        viz_queue=viz_queue,
-                                                        config_dir=self.toml_path,
-                                                        heartbeat=data_processing_heartbeat,
-                                                        heartbeat_interval_s=self.process_heartbeat_interval_s)
-                data_processing.daemon = True
-                data_processing.stdout = SubprocessRedirect(self.log_queue)
-                data_processing.stderr = SubprocessRedirect(self.log_queue, is_stderr=True)
-                data_processing.start()
-                self._register_process(data_processing, data_processing_heartbeat)
-                logger.info(f"start data_processing process ID: {data_processing.pid}")
+                pass  # 该模式已移除
 
             # 启动PLC通信进程
             plc_heartbeat = self._new_process_heartbeat()
@@ -282,49 +224,30 @@ class MainFrameController(MainFrame):
             lidar_config = get_active_lidar_config(self.sys_config)
 
             lidar_acquisition = None
-            if spray_mode == 0:
-                t0 = time.perf_counter()
-                lidar_heartbeat = self._new_process_heartbeat()
-                lidar_acquisition = LidarAcquisitionProcess(pulse_queue=pulse_queue,
-                                                            raw_data_queue=raw_data_queue,
-                                                            viz_queue=viz_queue,
-                                                            lidar_config=lidar_config,
-                                                            config_dir=self.toml_path,
-                                                            strategy_name=strategy_name,
-                                                            heartbeat=lidar_heartbeat,
-                                                            heartbeat_interval_s=self.process_heartbeat_interval_s)
-                logger.info(f"create lidar_acquisition object took {time.perf_counter() - t0:.3f}s")
-                lidar_acquisition.daemon = True
-                # 重定向激光采集进程输出
-                lidar_acquisition.stdout = SubprocessRedirect(self.log_queue)
-                lidar_acquisition.stderr = SubprocessRedirect(self.log_queue, is_stderr=True)
-                t1 = time.perf_counter()
-                lidar_acquisition.start()
-                logger.info(f"lidar_acquisition.start() returned in {time.perf_counter() - t1:.3f}s")
-                self._register_process(lidar_acquisition, lidar_heartbeat)
-                logger.info(f"start lidar_acquisition process ID: {lidar_acquisition.pid}")
-            else:
-                logger.info("spray_mode=1 manual mode, skip starting lidar_acquisition process")
+            t0 = time.perf_counter()
+            lidar_heartbeat = self._new_process_heartbeat()
+            lidar_acquisition = LidarAcquisitionProcess(pulse_queue=pulse_queue,
+                                                        raw_data_queue=raw_data_queue,
+                                                        viz_queue=viz_queue,
+                                                        lidar_config=lidar_config,
+                                                        config_dir=self.toml_path,
+                                                        strategy_name=strategy_name,
+                                                        heartbeat=lidar_heartbeat,
+                                                        heartbeat_interval_s=self.process_heartbeat_interval_s)
+            logger.info(f"create lidar_acquisition object took {time.perf_counter() - t0:.3f}s")
+            lidar_acquisition.daemon = True
+            # 重定向激光采集进程输出
+            lidar_acquisition.stdout = SubprocessRedirect(self.log_queue)
+            lidar_acquisition.stderr = SubprocessRedirect(self.log_queue, is_stderr=True)
+            t1 = time.perf_counter()
+            lidar_acquisition.start()
+            logger.info(f"lidar_acquisition.start() returned in {time.perf_counter() - t1:.3f}s")
+            self._register_process(lidar_acquisition, lidar_heartbeat)
+            logger.info(f"start lidar_acquisition process ID: {lidar_acquisition.pid}")
 
             machine_data_queue = None
             if is_complete_workpiece_mode(strategy_name):
-                from control.DataProcessingProcess import DataProcessingProcess
-                machine_data_queue = multiprocessing.Queue()
-                # 启动数据处理进程
-                data_processing_heartbeat = self._new_process_heartbeat()
-                data_processing = DataProcessingProcess(raw_data_queue=raw_data_queue,
-                                                        machine_data_queue=machine_data_queue,
-                                                        viz_queue=viz_queue,
-                                                        config_dir=self.toml_path,
-                                                        heartbeat=data_processing_heartbeat,
-                                                        heartbeat_interval_s=self.process_heartbeat_interval_s)
-                data_processing.daemon = True
-                # 重定向数据处理进程输出
-                data_processing.stdout = SubprocessRedirect(self.log_queue)
-                data_processing.stderr = SubprocessRedirect(self.log_queue, is_stderr=True)
-                data_processing.start()
-                self._register_process(data_processing, data_processing_heartbeat)
-                logger.info(f"start data_processing process ID: {data_processing.pid}")
+                pass  # 该模式已移除
 
             # 使用工厂方法创建 PLC 通信进程
             t2 = time.perf_counter()
@@ -348,6 +271,7 @@ class MainFrameController(MainFrame):
             logger.info(f"start plc_handler process ID: {plc_handler.pid}")
             # # --------------------------系统软件运行----------------------------------------
         else:
+            viz_queue = multiprocessing.Queue()
             data_paths = r"D:\draw_points\SXZJ"
             data_name = "20260405_104810.txt"
             # data_name = "20250723_095550.txt"  # 河村试喷大
@@ -355,7 +279,6 @@ class MainFrameController(MainFrame):
             # data_name = "20250805_112904.txt"  # 河村试喷小
 
             # 画图
-            visualizer = PointCloudVisualizer()
             for direction in get_active_directions(self.sys_config):
                 direction_path = os.path.join(data_paths, f"{direction}_{data_name}")
                 if not os.path.exists(direction_path):
@@ -363,7 +286,7 @@ class MainFrameController(MainFrame):
                     continue
                 data = np.loadtxt(direction_path)
                 point_cloud = np.asarray(data)[:, :3]
-                visualizer.draw_point_cloud(point_cloud)
+                viz_queue.put({"points": point_cloud, "boxes": None})
 
         # 启动可视化更新线程
         self.viz_timer = wx.Timer(self)
@@ -425,7 +348,7 @@ class MainFrameController(MainFrame):
         )
         logger.error(message)
         self.status_text.AppendText(f"\n\n--- {title} ---\n{detail}\n")
-        self.status_text.AppendText(self._text("系统已主动停机，避免链条继续运动导致数据错位或撞枪\n", "System stopped to prevent unintended motion.\n"))
+        self.status_text.AppendText("采集进程已停止，请检查连接后重新启动采集\n")
         self.status_text.AppendText(self._text("请检查激光/PLC连接、日志和硬件状态后重新启动系统\n", "Check lidar/PLC connections, logs and hardware before restarting.\n"))
         self.on_stop(None)
         wx.MessageBox(message, self._text("子进程异常", "Worker Process Error"), wx.OK | wx.ICON_ERROR)
