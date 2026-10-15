@@ -150,8 +150,8 @@ class MainFrameController(MainFrame):
             print(self._text("系统已在运行中", "The system is already running."))
             return
 
-        print("now start main.exe version is 2026/8/27 PM")
-        print(self._text("启动系统...", "Starting system..."))
+        print("now start main.exe version is 2026/10/15 PM")
+        print(self._text("启动精格软件系统...", "Starting system..."))
         self.running = True
         self._process_fault_handled = False
         self.process_heartbeats = {}

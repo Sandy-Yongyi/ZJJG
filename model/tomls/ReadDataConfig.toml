@@ -14,22 +14,22 @@
 # -----------------------------------------------------------------------------
 
 # 所有方向采用同一原点时的整体滤波范围
-combined_x_min = 1030
-combined_x_max = 2450
-combined_y_min = 1060
-combined_y_max = 3000
+combined_x_min = 1000
+combined_x_max = 3580
+combined_y_min = 1200
+combined_y_max = 3600
 
 # 左侧激光滤波范围
-left_x_min = 1030
-left_x_max = 1860
-left_y_min = 1060
-left_y_max = 3000
+left_x_min = 1000
+left_x_max = 3580
+left_y_min = 1200
+left_y_max = 3600
 
 # 右侧激光滤波范围
-right_x_min = 1080
-right_x_max = 1880
-right_y_min = 1060
-right_y_max = 3000
+right_x_min = 1000
+right_x_max = 3580
+right_y_min = 1200
+right_y_max = 3600
 
 # 左上侧激光滤波范围
 left_upper_x_min = -700
@@ -68,7 +68,7 @@ left_scan_points_threshold = 10          # 左侧少于该点数时不认为是�
 right_scan_points_threshold = 10         # 右侧少于该点数时不认为是有效数据
 left_upper_scan_points_threshold = 10    # 左上侧少于该点数时不认为是有效数据
 right_upper_scan_points_threshold = 10   # 右上侧少于该点数时不认为是有效数据
-max_scan_length = 10000                  # 超过该扫描长度时自动结束当前工件，单位 mm
+max_scan_length = 5000                  # 超过该扫描长度时自动结束当前工件，单位 mm
 
 
 # -----------------------------------------------------------------------------
@@ -96,7 +96,7 @@ process_unresponsive_timeout_s = 60       # 主进程判定子进程无响应的
 # -----------------------------------------------------------------------------
 # 6. 数据坐标、绘制与线程
 # -----------------------------------------------------------------------------
-translate_data_origin = 2                # 1=各激光使用同一原点，2=各自使用独立原点
+translate_data_origin = 1                # 1=各激光使用同一原点，2=各自使用独立原点
 draw_type = 2                            # 1=点云，2=线框，3=点云+线框
 threadpool_size = 3                      # 点云处理与保存线程池大小
 
