@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from queue import Queue
 from tempfile import TemporaryDirectory
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -129,6 +130,35 @@ class FrameOnlyTests(unittest.TestCase):
                 expected = bytearray(194)
                 expected[10:12] = heartbeat.to_bytes(2, "big", signed=True)
                 self.assertEqual(packet, bytes(expected))
+
+    def test_plc_sends_zero_frame_before_entering_receive_loop(self):
+        process = PlcCommunicationProcess.create("frame_by_frame", Queue(), Queue(), Queue())
+        events = []
+        process.plc = Mock()
+        process.plc.send_frame.side_effect = lambda frame: events.append(frame.to_bytes())
+        with patch.object(process, "_initialize_connection", return_value=True), patch.object(
+            process, "_run_main_loop", side_effect=lambda: events.append("loop"),
+        ):
+            process.run()
+        self.assertEqual(events, [bytes(194), "loop"])
+
+    def test_plc_does_not_send_startup_frame_in_simulation_or_on_connection_failure(self):
+        for simulation in (False, True):
+            with self.subTest(simulation=simulation):
+                process = PlcCommunicationProcess.create("frame_by_frame", Queue(), Queue(), Queue())
+                process.simulation_mode = simulation
+                process.plc = Mock()
+                with patch.object(process, "_initialize_connection", return_value=False) as connect, patch.object(
+                    process, "_run_main_loop",
+                ) as loop:
+                    process.run()
+                process.plc.send_frame.assert_not_called()
+                if simulation:
+                    connect.assert_not_called()
+                    loop.assert_called_once()
+                else:
+                    connect.assert_called_once()
+                    loop.assert_not_called()
 
 
 if __name__ == "__main__":

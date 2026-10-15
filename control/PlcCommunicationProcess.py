@@ -96,6 +96,8 @@ class PlcCommunicationProcess(multiprocessing.Process):
             if not self.simulation_mode:
                 if not self._initialize_connection():
                     return  # 连接失败退出进程
+                # 首次连接后先发送全零帧，再进入接收及心跳回传循环。
+                self.plc.send_frame(SendMovingFrameData())
             # time.sleep(5)  # TODO: 调试时使用，正式环境可移除或调整为更短时间，确保PLC连接稳定后再进入主循环
             # 主处理循环
             self._run_main_loop()
